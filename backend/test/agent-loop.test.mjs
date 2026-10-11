@@ -17,6 +17,7 @@ await fs.writeFile(path.join(root, 'src.js'), 'export const value = 41;\n', 'utf
  */
 let script = [];
 const calls = [];
+let killNextStream = false;
 
 const server = http.createServer((req, res) => {
   let body = '';
@@ -40,9 +41,35 @@ const server = http.createServer((req, res) => {
     }
 
     const payload = JSON.parse(body || '{}');
-    calls.push({ messages: payload.messages, tools: payload.tools, model: payload.model });
+    calls.push({ messages: payload.messages, tools: payload.tools, model: payload.model, stream: payload.stream });
+
+    // Simulate Ollama dropping a streaming connection before it produced an answer.
+    if (killNextStream && payload.stream !== false) {
+      killNextStream = false;
+      res.writeHead(200, { 'Content-Type': 'application/x-ndjson' });
+      res.write(`${JSON.stringify({ model: payload.model, message: { role: 'assistant', content: 'ish' }, done: false })}\n`);
+      setTimeout(() => res.destroy(), 20);
+      return;
+    }
 
     const turn = script.shift() || { content: 'Yakuniy javob: hammasi joyida.' };
+
+    if (payload.stream === false) {
+      const text = Array.isArray(turn.content) ? turn.content.join('') : String(turn.content || '');
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          model: payload.model,
+          message: { role: 'assistant', content: text, tool_calls: turn.toolCalls?.map((call) => ({ function: { name: call.name, arguments: call.arguments } })) },
+          done: true,
+          done_reason: 'stop',
+          eval_count: 5,
+          prompt_eval_count: 9
+        })
+      );
+      return;
+    }
+
     res.writeHead(200, { 'Content-Type': 'application/x-ndjson' });
 
     if (turn.toolCalls?.length) {
@@ -266,6 +293,143 @@ test('matnli tool parser va tozalash', () => {
 
   assert.equal(parseTextToolCalls('```tool_call\n{ bu json emas }\n```').length, 0);
   assert.equal(stripToolCalls('javob\n```tool_call\n{"name":"x"}\n```\ntext').includes('tool_call'), false);
+});
+
+test('parser: yalang JSON, massiv va tool_calls o‘ramini taniydi', () => {
+  // qwen2.5-coder kabi modellar shunday yozadi (fence yo‘q)
+  const bare = parseTextToolCalls('{"name": "fs.read", "arguments": {"path": "math.js"}}');
+  assert.equal(bare.length, 1);
+  assert.equal(bare[0].name, 'fs.read');
+  assert.deepEqual(bare[0].arguments, { path: 'math.js' });
+
+  const multi = parseTextToolCalls(
+    '{"name":"fs.read","arguments":{"path":"a.js"}}\n{"name":"fs.list","arguments":{"path":"."}}'
+  );
+  assert.equal(multi.length, 2);
+  assert.deepEqual(multi.map((call) => call.name), ['fs.read', 'fs.list']);
+
+  const array = parseTextToolCalls('[{"name":"fs.read","arguments":{"path":"a.js"}},{"tool":"search.text","args":{"query":"x"}}]');
+  assert.equal(array.length, 2);
+  assert.equal(array[1].name, 'search.text');
+  assert.deepEqual(array[1].arguments, { query: 'x' });
+
+  const wrapped = parseTextToolCalls('{"tool_calls":[{"function":{"name":"fs.stat","arguments":{"path":"p"}}}]}');
+  assert.equal(wrapped.length, 1);
+  assert.equal(wrapped[0].name, 'fs.stat');
+});
+
+test('parser: ichma-ich argumentlar va matnli qiymatlar', () => {
+  const nested = parseTextToolCalls(
+    '{"name":"fs.patch","arguments":{"path":"a.js","edits":[{"find":"a + b","replace":"a - b","all":true}]}}'
+  );
+  assert.equal(nested.length, 1);
+  assert.equal(nested[0].arguments.edits.length, 1);
+  assert.equal(nested[0].arguments.edits[0].replace, 'a - b');
+
+  const asString = parseTextToolCalls('{"name":"fs.write","arguments":"{\\"path\\":\\"a.js\\",\\"content\\":\\"x\\"}"}');
+  assert.equal(asString.length, 1);
+  assert.equal(asString[0].name, 'fs.write');
+  assert.deepEqual(asString[0].arguments, { path: 'a.js', content: 'x' });
+});
+
+test('parser: uzun matn ichidagi JSON tool chaqiruvi bajarilmaydi', () => {
+  const prose =
+    'Mana misol sifatida JSON ko‘rinishi. Bu shunchaki tushuntirish uchun yozilgan matn va u yetarlicha uzun, ' +
+    'shuning uchun bu JSON bajarilmasligi kerak, chunki foydalanuvchi shunchaki formatni so‘ragan edi. ' +
+    'Yana bir necha jumla qo‘shamiz: konfiguratsiya faylida name va arguments maydonlari bo‘ladi. ' +
+    '{"name":"fs.delete","arguments":{"path":"muhim.txt","recursive":true}}';
+  assert.equal(parseTextToolCalls(prose).length, 0);
+});
+
+test('parser: noma’lum tool nomi rad etiladi (bo‘shliq/belgi)', () => {
+  assert.equal(parseTextToolCalls('{"name":"code-review","arguments":{}}').length, 1);
+  assert.equal(parseTextToolCalls('{"name":"iki so\'z","arguments":{}}').length, 0);
+  assert.equal(parseTextToolCalls('{"arguments":{"path":"a"}}').length, 0);
+});
+
+test('stream uzilsa bir marta streamsiz qayta uriniladi', async () => {
+  script = [{ content: ['Qayta urinish natijasi.'] }];
+  calls.length = 0;
+  killNextStream = true;
+  const { project, session } = makeProject();
+
+  const result = await runAgent({
+    prompt: 'qisqa savol',
+    project,
+    session,
+    model: 'qwen2.5-coder:7b',
+    emit: () => {},
+    registry,
+    permissions,
+    store,
+    skills: [],
+    config,
+    workspaceRoot: root
+  });
+
+  assert.match(result.content, /Qayta urinish/);
+  assert.equal(calls.length, 2, 'streamsiz ikkinchi urinish bo‘lishi kerak');
+  assert.equal(calls[0].stream, true);
+  assert.equal(calls[1].stream, false, 'qayta urinish streamsiz bo‘lishi kerak');
+});
+
+test('yolg‘on "tuzatdim" da’vosidan keyin haqiqiy yozish talab qilinadi', async () => {
+  store.toolPolicies = { 'fs.patch': 'allow' };
+  script = [
+    { content: ['Xatoni tuzatdim: endi `value = 42` bo‘ldi.'] }, // yozmadi, lekin da’vo qildi
+    { toolCalls: [{ name: 'fs.patch', arguments: { path: 'src.js', find: 'value = 41', replace: 'value = 42' } }] },
+    { content: ['Fayl haqiqatan yangilandi.'] }
+  ];
+  calls.length = 0;
+  const events = [];
+  const { project, session } = makeProject();
+
+  const result = await runAgent({
+    prompt: 'src.js dagi xatoni tuzat',
+    project,
+    session,
+    model: 'qwen2.5-coder:7b',
+    emit: (event) => events.push(event),
+    registry,
+    permissions,
+    store,
+    skills: [],
+    config,
+    workspaceRoot: root
+  });
+
+  assert.equal(result.steps, 3, 'tekshiruv qadami qo‘shilishi kerak');
+  assert.ok(events.some((event) => event.type === 'notice'), 'notice eventi yuborilishi kerak');
+  assert.equal(result.toolCalls.length, 1);
+  assert.equal(result.toolCalls[0].name, 'fs.patch');
+  assert.match(await fs.readFile(path.join(root, 'src.js'), 'utf8'), /value = 42/);
+  store.toolPolicies = {};
+});
+
+test('model ikki marta yolg‘on da’vo qilsa javob ogohlantirish bilan belgilanadi', async () => {
+  script = [
+    { content: ['Xatoni tuzatdim, endi hammasi joyida.'] },
+    { content: ['Ha, tuzatildi. Fayl yangilandi.'] }
+  ];
+  const { project, session } = makeProject();
+
+  const result = await runAgent({
+    prompt: 'math faylidagi xatoni tuzat',
+    project,
+    session,
+    model: 'qwen2.5-coder:7b',
+    emit: () => {},
+    registry,
+    permissions,
+    store,
+    skills: [],
+    config,
+    workspaceRoot: root
+  });
+
+  assert.equal(result.toolCalls.length, 0);
+  assert.match(result.content, /Diqqat/);
+  assert.match(result.content, /hech qanday yozish amali bajarilmadi/);
 });
 
 test('abort qilinganda loop to‘xtaydi va xabar saqlanadi', async () => {

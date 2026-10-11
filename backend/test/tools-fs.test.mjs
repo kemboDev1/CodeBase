@@ -103,6 +103,31 @@ test('fs.stat mavjud va yo‘q yo‘lni ajratadi', async () => {
   assert.equal(missing.data.exists, false);
 });
 
+test('fs.read noto‘g‘ri papka prefiksini o‘zi tuzatadi', async () => {
+  // Model "index.js" so‘radi, lekin fayl src/index.js da — yagona moslik topilishi kerak.
+  const result = await fsRead.run({ path: 'index.js' }, ctx);
+  assert.equal(result.ok, true);
+  assert.equal(result.data.corrected, true);
+  assert.match(result.data.path, /src\/index\.js/);
+  assert.match(result.summary, /tuzatildi/);
+});
+
+test('fs.read bir xil nomli bir nechta faylda taxmin qilmaydi', async () => {
+  await fsWrite.run({ path: 'a/dup.txt', content: 'a' }, ctx);
+  await fsWrite.run({ path: 'b/dup.txt', content: 'b' }, ctx);
+  const result = await fsRead.run({ path: 'dup.txt' }, ctx);
+  assert.equal(result.ok, false);
+  assert.match(result.error, /Bir xil nomli fayllar/);
+});
+
+test('fs.patch ham yo‘lni tuzatadi', async () => {
+  const result = await fsPatch.run({ path: 'deep/new/file.js', find: 'export default 42;', replace: 'export default 43;' }, ctx);
+  assert.equal(result.ok, true);
+  assert.equal(result.data.corrected, true, 'yagona moslik topilib, yo‘l tuzatilishi kerak');
+  assert.match(result.data.path, /src\/deep\/new\/file\.js/);
+  assert.match(await fs.readFile(path.join(root, 'src', 'deep', 'new', 'file.js'), 'utf8'), /43/);
+});
+
 test('fs.mkdir, fs.move va fs.delete', async () => {
   assert.equal((await fsMkdir.run({ path: 'yangi/papka' }, ctx)).ok, true);
   assert.equal((await fsMove.run({ from: 'multi.txt', to: 'yangi/papka/multi.txt' }, ctx)).ok, true);

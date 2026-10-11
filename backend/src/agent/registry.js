@@ -171,7 +171,8 @@ export function createRegistry({ logger } = {}) {
     const tool = tools.get(name);
     const emit = typeof ctx.emit === 'function' ? ctx.emit : () => {};
     if (!tool) {
-      const error = `Noma’lum tool: ${name}`;
+      const available = [...tools.keys()].join(', ');
+      const error = `Noma’lum tool: ${name}. Mavjud tool’lar: ${available.slice(0, 900)}`;
       recordAudit({ tool: name, decision: 'error', ok: false, error, projectId: ctx.projectId, sessionId: ctx.sessionId });
       return { ok: false, error, content: `XATO: ${error}` };
     }

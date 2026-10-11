@@ -119,9 +119,41 @@ function normalizeToolCalls(raw, index = 0) {
 
 /**
  * Chat with an Ollama model. Supports streaming, tool calling, abort and thinking suppression.
+ *
+ * A local Ollama server occasionally drops a long streaming connection ("terminated").
+ * When that happens before any token was produced, the request is retried once without
+ * streaming — the user still gets a real answer instead of a network error.
+ *
  * @returns {Promise<{content:string, toolCalls:Array, model:string, promptTokens:number, evalTokens:number, doneReason:string}>}
  */
-export async function chat({
+export async function chat(options = {}) {
+  try {
+    return await chatOnce(options);
+  } catch (error) {
+    const retryable =
+      options.stream !== false &&
+      options.retryOnFail !== false &&
+      options.onToken &&
+      !options.signal?.aborted &&
+      isTransientStreamError(error);
+    if (!retryable) throw error;
+    log.warn(`Ollama stream uzildi (${error.message}) — bir marta qayta urinib ko‘riladi (streamsiz).`);
+    const result = await chatOnce({ ...options, stream: false, retryOnFail: false, onToken: undefined });
+    if (result.content) options.onToken(result.content);
+    return result;
+  }
+}
+
+function isTransientStreamError(error) {
+  const message = String(error?.message || '');
+  const code = String(error?.cause?.code || error?.code || '');
+  return (
+    /terminated|other side closed|socket hang up|ECONNRESET|UND_ERR_SOCKET|fetch failed/i.test(message) ||
+    /UND_ERR_SOCKET|ECONNRESET|EPIPE/i.test(code)
+  );
+}
+
+async function chatOnce({
   model,
   messages,
   tools,
@@ -222,7 +254,13 @@ export async function chat({
       throw error;
     }
   } finally {
-    try { reader.cancel(); } catch { /* stream already closed */ }
+    // `cancel()` returns a promise that rejects when the stream already died; it must be
+    // awaited, otherwise every dropped Ollama connection surfaces as an unhandled rejection.
+    try {
+      await reader.cancel();
+    } catch {
+      /* stream already closed or aborted */
+    }
   }
 
   return { content, thinking, toolCalls, model: modelName, promptTokens, evalTokens, doneReason };

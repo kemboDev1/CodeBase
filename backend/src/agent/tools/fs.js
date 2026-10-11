@@ -1,7 +1,10 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { resolveInside, toRel } from '../../lib/paths.js';
+import { resolveInside, toRel, ignoredDir } from '../../lib/paths.js';
 import { humanBytes, normalizeNewlines, truncate } from '../../lib/text.js';
+import { logger } from '../../lib/logger.js';
+
+const log = logger.make('fs-tools');
 
 const MAX_READ_BYTES = 400_000;
 const MAX_WRITE_BYTES = 2_000_000;
@@ -29,6 +32,73 @@ async function exists(target) {
   }
 }
 
+/**
+ * Directory listing used inside "file not found" errors so the model can self-correct.
+ */
+async function nearbyListing(target, ctx) {
+  const candidates = [path.dirname(target), ctx.projectRoot || ctx.roots[0]].filter(Boolean);
+  for (const dir of candidates) {
+    const entries = await fs.readdir(dir, { withFileTypes: true }).catch(() => []);
+    if (!entries.length) continue;
+    const listing = entries
+      .slice(0, 25)
+      .map((entry) => (entry.isDirectory() ? `${entry.name}/` : entry.name))
+      .join(', ');
+    return ` ${toRel(dir)} papkasidagi fayllar: ${listing}`;
+  }
+  return ' Workspace bo‘sh — fs.list bilan tekshiring.';
+}
+
+/**
+ * Small local models invent path prefixes (`src/math.js` when the file is `math.js`).
+ * Instead of failing, look for a unique file with the same basename inside the
+ * workspace and use it, telling the model that the path was corrected.
+ *
+ * @returns {{target:string, corrected:boolean, alternatives:string[]}}
+ */
+async function resolveExisting(ctx, requested) {
+  const direct = resolveInside(ctx.projectRoot, requested);
+  const stat = await fs.stat(direct).catch(() => null);
+  if (stat) return { target: direct, corrected: false, alternatives: [] };
+
+  const root = ctx.projectRoot || ctx.roots[0];
+  if (!root) return { target: direct, corrected: false, alternatives: [] };
+
+  const wanted = String(requested).replace(/\\/g, '/').replace(/^\.?\//, '');
+  const base = path.basename(wanted).toLowerCase();
+  const alternatives = [];
+  const stack = [root];
+  let scanned = 0;
+  while (stack.length && alternatives.length < 8 && scanned < 5_000) {
+    const dir = stack.pop();
+    const entries = await fs.readdir(dir, { withFileTypes: true }).catch(() => []);
+    for (const entry of entries) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        if (!ignoredDir(entry.name)) stack.push(full);
+        continue;
+      }
+      scanned += 1;
+      if (entry.name.toLowerCase() !== base) continue;
+      const rel = toRel(full).replace(/\\/g, '/');
+      // Prefer a file whose path ends with what the model asked for.
+      if (rel.endsWith(wanted.toLowerCase())) alternatives.unshift(full);
+      else alternatives.push(full);
+      if (alternatives.length >= 8) break;
+    }
+  }
+
+  if (alternatives.length === 1) {
+    log.debug(`Yo‘l tuzatildi: ${wanted} → ${toRel(alternatives[0])}`);
+    return { target: alternatives[0], corrected: true, alternatives: [] };
+  }
+  return { target: direct, corrected: false, alternatives };
+}
+
+function pathNote(result) {
+  return result.corrected ? ` (yo‘l tuzatildi: ${toRel(result.target)})` : '';
+}
+
 export const fsRead = def(
   'fs.read',
   'Read file',
@@ -44,9 +114,15 @@ export const fsRead = def(
     required: ['path']
   },
   async (args, ctx) => {
-    const target = resolve(ctx, args.path);
+    const resolved = await resolveExisting(ctx, args.path);
+    const target = resolved.target;
     const stat = await fs.stat(target).catch(() => null);
-    if (!stat) return { ok: false, error: `Fayl topilmadi: ${toRel(target)}` };
+    if (!stat) {
+      const hint = resolved.alternatives.length
+        ? ` Bir xil nomli fayllar: ${resolved.alternatives.map((item) => toRel(item)).join(', ')}`
+        : await nearbyListing(target, ctx);
+      return { ok: false, error: `Fayl topilmadi: ${toRel(target)}.${hint}` };
+    }
     if (stat.isDirectory()) return { ok: false, error: `${toRel(target)} papka — fs.list dan foydalaning.` };
     if (stat.size > MAX_READ_BYTES) {
       return { ok: false, error: `Fayl juda katta (${humanBytes(stat.size)}). search.text yoki terminal (head/tail) ishlatib ko‘ring.` };
@@ -60,13 +136,13 @@ export const fsRead = def(
     const truncated = offset - 1 + limit < lines.length;
     return {
       ok: true,
-      summary: `${toRel(target)} o‘qildi (${slice.length}/${lines.length} qator, ${humanBytes(stat.size)})`,
+      summary: `${toRel(target)} o‘qildi (${slice.length}/${lines.length} qator, ${humanBytes(stat.size)})${pathNote(resolved)}`,
       content: [
-        `FILE ${toRel(target)} (${lines.length} lines, ${humanBytes(stat.size)})`,
+        `FILE ${toRel(target)} (${lines.length} lines, ${humanBytes(stat.size)})${pathNote(resolved)}`,
         numbered,
         truncated ? `… [davomi bor: offset=${offset + slice.length} bilan davom eting]` : ''
       ].filter(Boolean).join('\n'),
-      data: { path: toRel(target), lines: lines.length, returned: slice.length, truncated, size: stat.size }
+      data: { path: toRel(target), lines: lines.length, returned: slice.length, truncated, size: stat.size, corrected: resolved.corrected }
     };
   }
 );
@@ -174,9 +250,15 @@ export const fsPatch = def(
     required: ['path']
   },
   async (args, ctx) => {
-    const target = resolve(ctx, args.path);
+    const resolved = await resolveExisting(ctx, args.path);
+    const target = resolved.target;
     const source = await fs.readFile(target, 'utf8').catch(() => null);
-    if (source === null) return { ok: false, error: `Fayl topilmadi: ${toRel(target)}` };
+    if (source === null) {
+      const hint = resolved.alternatives.length
+        ? ` Bir xil nomli fayllar: ${resolved.alternatives.map((item) => toRel(item)).join(', ')}`
+        : await nearbyListing(target, ctx);
+      return { ok: false, error: `Fayl topilmadi: ${toRel(target)}.${hint}` };
+    }
     const edits = Array.isArray(args.edits) && args.edits.length
       ? args.edits
       : (args.find !== undefined ? [{ find: args.find, replace: args.replace ?? '', all: args.all }] : []);
@@ -190,12 +272,12 @@ export const fsPatch = def(
     await fs.writeFile(target, result, 'utf8');
     return {
       ok: true,
-      summary: `${toRel(target)}: ${applied.filter((a) => a.ok).length}/${edits.length} o‘zgarish qo‘llandi`,
+      summary: `${toRel(target)}: ${applied.filter((a) => a.ok).length}/${edits.length} o‘zgarish qo‘llandi${pathNote(resolved)}`,
       content: [
-        `OK: ${toRel(target)} yangilandi.`,
+        `OK: ${toRel(target)} yangilandi.${pathNote(resolved)}`,
         ...applied.map((item, index) => `${index + 1}. ${item.ok ? `qo‘llandi (${item.replaced}x)` : `O‘TKAZIB YUBORILDI — ${item.reason}`}`)
       ].join('\n'),
-      data: { path: toRel(target), applied }
+      data: { path: toRel(target), applied, corrected: resolved.corrected }
     };
   },
   { timeoutMs: 30_000 }
@@ -258,14 +340,20 @@ export const fsStat = def(
     required: ['path']
   },
   async (args, ctx) => {
-    const target = resolve(ctx, args.path);
+    const resolved = await resolveExisting(ctx, args.path);
+    const target = resolved.target;
     const stat = await fs.stat(target).catch(() => null);
-    if (!stat) return { ok: true, summary: `${toRel(target)} mavjud emas`, content: `NOT FOUND: ${toRel(target)}`, data: { exists: false } };
+    if (!stat) {
+      const hint = resolved.alternatives.length
+        ? ` Bir xil nomli fayllar: ${resolved.alternatives.map((item) => toRel(item)).join(', ')}`
+        : await nearbyListing(target, ctx);
+      return { ok: true, summary: `${toRel(target)} mavjud emas`, content: `NOT FOUND: ${toRel(target)}.${hint}`, data: { exists: false } };
+    }
     return {
       ok: true,
       summary: `${toRel(target)} — ${stat.isDirectory() ? 'papka' : humanBytes(stat.size)}`,
       content: `EXISTS: ${toRel(target)}\ntype: ${stat.isDirectory() ? 'directory' : 'file'}\nsize: ${stat.size} bytes\nmodified: ${stat.mtime.toISOString()}`,
-      data: { exists: true, directory: stat.isDirectory(), size: stat.size, mtime: stat.mtime.toISOString() }
+      data: { exists: true, directory: stat.isDirectory(), size: stat.size, mtime: stat.mtime.toISOString(), corrected: resolved.corrected }
     };
   }
 );

@@ -2,7 +2,7 @@ import { config } from '../config.js';
 import * as ollama from '../ollama/client.js';
 import { buildSystemPrompt } from '../ollama/prompts.js';
 import { detectLanguage, greetingReply } from '../lib/lang.js';
-import { estimateTokens, oneLine, truncate, digest } from '../lib/text.js';
+import { estimateTokens, oneLine, truncate, digest, safeJsonParse } from '../lib/text.js';
 import { makeId, saveStore } from '../store.js';
 import { logger } from '../lib/logger.js';
 
@@ -11,29 +11,127 @@ const log = logger.make('agent');
 const MAX_TOOL_CONTENT = 8_000;
 const MAX_TOTAL_TOOL_CHARS = 24_000;
 
-/** Pull `tool_call` fenced blocks out of a plain-text answer (fallback protocol). */
-export function parseTextToolCalls(content) {
-  const calls = [];
-  const pattern = /```tool_call\s*([\s\S]*?)```/gi;
-  let match = pattern.exec(String(content || ''));
-  while (match) {
-    const raw = match[1].trim().replace(/^```|```$/g, '');
-    try {
-      const parsed = JSON.parse(raw);
-      const name = String(parsed?.name || parsed?.tool || '').trim();
-      if (name) {
-        calls.push({
-          id: `text_${calls.length}_${Math.random().toString(36).slice(2, 7)}`,
-          name,
-          arguments: parsed.arguments || parsed.args || {}
-        });
-      }
-    } catch {
-      log.debug(`tool_call bloki JSON emas: ${raw.slice(0, 120)}`);
+const WRITE_TOOLS = new Set(['fs.write', 'fs.patch', 'fs.append', 'fs.delete', 'fs.move', 'fs.mkdir']);
+const CHANGE_REQUEST = /(tuzat|o‘zgartir|o'zgartir|yoz|yarat|qo‘sh|qo'sh|o‘chir|refactor|rename|fix|change|update|create|write|add|remove|delete|move|patch)/i;
+// Deliberately stem-based: small models write "tuzatdim", "tuzatildi", "tuzatish kerak" …
+// any of those means "I am talking about a change", and if no write tool ran we re-ask.
+const CHANGE_CLAIM = /(tuzat|o‘zgartir|o'zgartir|yoz|yarat|qo‘sh|qo'sh|o‘chir|saqla|fixed|updated|created|written|modified|patched|applied|renamed|deleted)/i;
+
+const HONESTY_NUDGE = [
+  'DIQQAT: oldingi javobingizda fayl o‘zgartirilganini aytdingiz, lekin bu suhbatda hech qanday yozish tool’i ishlamadi (fs.write / fs.patch / fs.append / fs.delete / fs.move).',
+  'Agar vazifa haqiqatan faylni o‘zgartirishni talab qilsa, hozir tegishli tool’ni chaqirib, o‘zgarishni kiriting.',
+  'Agar o‘zgarish kerak bo‘lmasa yoki fayl allaqachon to‘g‘ri bo‘lsa, buni aniq va qisqa qilib ayting.'
+].join('\n');
+
+/**
+ * Extract every balanced JSON object from a string (string-aware brace matching).
+ * A regex cannot do this reliably because tool arguments are nested objects.
+ */
+function extractJsonObjects(source) {
+  const text = String(source || '');
+  const found = [];
+  let index = 0;
+  while (index < text.length) {
+    if (text[index] !== '{') {
+      index += 1;
+      continue;
     }
-    match = pattern.exec(content);
+    let depth = 0;
+    let inString = false;
+    let escaped = false;
+    let cursor = index;
+    for (; cursor < text.length; cursor += 1) {
+      const char = text[cursor];
+      if (inString) {
+        if (escaped) escaped = false;
+        else if (char === '\\') escaped = true;
+        else if (char === '"') inString = false;
+        continue;
+      }
+      if (char === '"') inString = true;
+      else if (char === '{') depth += 1;
+      else if (char === '}') {
+        depth -= 1;
+        if (depth === 0) break;
+      }
+    }
+    if (depth !== 0) break;
+    const candidate = text.slice(index, cursor + 1);
+    try {
+      found.push({ value: JSON.parse(candidate), start: index, end: cursor + 1 });
+    } catch {
+      /* not JSON — ignore this object */
+    }
+    index = cursor + 1;
   }
-  return calls;
+  return found;
+}
+
+/** Turn one parsed JSON value into zero or more tool calls. */
+function callsFromValue(value) {
+  if (Array.isArray(value)) return value.flatMap((entry) => callsFromValue(entry));
+  if (!value || typeof value !== 'object') return [];
+  if (Array.isArray(value.tool_calls)) return callsFromValue(value.tool_calls);
+  if (Array.isArray(value.toolCalls)) return callsFromValue(value.toolCalls);
+
+  const holder = value.function && typeof value.function === 'object' ? value.function : value;
+  const name = holder.name ?? holder.tool ?? holder.tool_name ?? value.name ?? value.tool ?? value.tool_name;
+  if (typeof name !== 'string' || !name.trim() || /\s/.test(name.trim())) return [];
+
+  const rawArgs = holder.arguments ?? holder.args ?? holder.parameters ?? value.arguments ?? value.args ?? value.parameters;
+  const args = typeof rawArgs === 'string' ? safeJsonParse(rawArgs, {}) : rawArgs;
+  if (args !== undefined && args !== null && (typeof args !== 'object' || Array.isArray(args))) return [];
+  return [{ name: name.trim(), arguments: args || {} }];
+}
+
+/**
+ * Parse tool calls out of plain model text.
+ *
+ * Local models are inconsistent: some emit fenced ```tool_call blocks, some emit bare
+ * JSON objects/arrays, some wrap them in {"tool_calls":[...]}. All of those shapes are
+ * accepted — but only when the prose around them is short, so JSON that merely appears
+ * inside an explanation is never executed.
+ *
+ * @returns {{id:string,name:string,arguments:object}[]}
+ */
+export function parseTextToolCalls(content) {
+  const text = String(content || '');
+  if (!text.trim()) return [];
+  const collected = [];
+
+  // 1. Explicit fenced blocks (tool_call / json / tool / none).
+  let masked = text;
+  const fence = /```(\w*)\s*([\s\S]*?)```/g;
+  let match = fence.exec(text);
+  while (match) {
+    for (const candidate of extractJsonObjects(match[2])) collected.push(...callsFromValue(candidate.value));
+    // Blank the fenced region (same length, so offsets stay valid) so the bare scan
+    // below cannot count the very same JSON twice.
+    const start = match.index;
+    const end = fence.lastIndex;
+    masked = masked.slice(0, start) + ' '.repeat(end - start) + masked.slice(end);
+    match = fence.exec(text);
+  }
+
+  // 2. Bare JSON in the message body.
+  const objects = extractJsonObjects(masked);
+  let remainder = masked;
+  for (const object of [...objects].reverse()) {
+    remainder = remainder.slice(0, object.start) + remainder.slice(object.end);
+  }
+  const prose = remainder.replace(/[\s`*_#>\-.,:;!?()[\]]/g, '');
+  const bare = objects.flatMap((object) => callsFromValue(object.value));
+  const acceptBare = bare.length > 0 && prose.length <= 160;
+  if (acceptBare) collected.push(...bare);
+  else if (!collected.length && bare.length > 0) {
+    log.debug(`Matndagi JSON tool chaqiruvi rad etildi (atrofida ${prose.length} belgi matn bor).`);
+  }
+
+  return collected.map((call, index) => ({
+    id: `text_${index}_${Math.random().toString(36).slice(2, 7)}`,
+    name: call.name,
+    arguments: call.arguments || {}
+  }));
 }
 
 /** Remove tool_call blocks from the visible answer. */
@@ -225,6 +323,7 @@ export async function runAgent({
   let stopped = false;
   let toolChars = 0;
   let lastError = '';
+  let honestyChecked = false;
 
   for (let step = 0; step < maxSteps; step += 1) {
     if (signal?.aborted) {
@@ -274,28 +373,62 @@ export async function runAgent({
       break;
     }
 
-    const calls = protocol === 'native'
-      ? (result.toolCalls || [])
-      : parseTextToolCalls(result.content);
+    // Local models are inconsistent: even with the tools interface available, some
+    // answer with bare JSON. Accept both shapes.
+    const nativeCalls = result.toolCalls || [];
+    const textCalls = nativeCalls.length ? [] : parseTextToolCalls(result.content);
+    const calls = nativeCalls.length ? nativeCalls : textCalls;
+    const viaNative = nativeCalls.length > 0;
     log.debug(
       `Run ${runId}: model javobi ${result.content.length} belgi, ${calls.length} tool call` +
-        (calls.length ? ` (${calls.map((call) => call.name).join(', ')})` : '')
+        (calls.length ? ` (${calls.map((call) => call.name).join(', ')}${viaNative ? '' : ' [matndan]'})` : '')
     );
 
     if (!calls.length) {
-      finalContent = protocol === 'native' ? result.content : stripToolCalls(result.content);
+      const cleaned = stripToolCalls(result.content) || result.content;
+      const wroteSomething = executed.some((call) => call.ok && WRITE_TOOLS.has(call.name));
+      const claimsChange = CHANGE_CLAIM.test(cleaned);
+      const askedForChange = CHANGE_REQUEST.test(prompt);
+
+      // Anti-hallucination guard: a small model may claim it changed a file without
+      // ever calling a write tool. Give it exactly one chance to actually do it.
+      if (!honestyChecked && !wroteSomething && claimsChange && askedForChange && steps < maxSteps && !stopped) {
+        honestyChecked = true;
+        log.warn(`Run ${runId}: model o‘zgarish haqida yozdi, lekin yozish tool’i ishlamadi — tekshiruv qadami qo‘shildi.`);
+        sse({ type: 'notice', message: 'Model o‘zgarishni yozmagan — qayta tekshirilmoqda.' });
+        messages.push({ role: 'assistant', content: result.content });
+        messages.push({ role: 'user', content: HONESTY_NUDGE });
+        continue;
+      }
+
+      // The model ignored the first nudge and still claims a change it never made:
+      // keep the answer but mark it clearly so the user is never misled.
+      if (honestyChecked && !wroteSomething && claimsChange && askedForChange) {
+        log.warn(`Run ${runId}: model yozish amalisiz o‘zgarish da’vo qildi — javob ogohlantirish bilan belgilandi.`);
+        sse({ type: 'notice', message: 'Model o‘zgarishni yozmadi (ogohlantirish qo‘shildi).' });
+        finalContent = [
+          '> ⚠️ **Diqqat:** model fayl o‘zgarganini aytdi, lekin bu suhbatda hech qanday yozish amali bajarilmadi.',
+          '> Fayl o‘zgartirilmagan bo‘lishi mumkin — iltimos tekshiring yoki aniqroq qilib qayta so‘rang (masalan: “fs.patch bilan a - b ni a + b ga o‘zgartir”).',
+          '',
+          cleaned
+        ].join('\n');
+        break;
+      }
+
+      finalContent = cleaned;
       break;
     }
 
     // Register the assistant turn that requested the tools.
-    const assistantTurn = protocol === 'native'
-      ? {
-          role: 'assistant',
-          content: result.content || '',
-          tool_calls: calls.map((call) => ({ function: { name: call.name, arguments: call.arguments } }))
-        }
-      : { role: 'assistant', content: result.content };
-    messages.push(assistantTurn);
+    messages.push(
+      viaNative
+        ? {
+            role: 'assistant',
+            content: result.content || '',
+            tool_calls: calls.map((call) => ({ function: { name: call.name, arguments: call.arguments } }))
+          }
+        : { role: 'assistant', content: result.content }
+    );
 
     for (const call of calls) {
       if (signal?.aborted) {
@@ -332,11 +465,15 @@ export async function runAgent({
         contentPreview: truncate(output.content || output.error || '', 1_200)
       });
 
+      // Native tool calling gets the raw result (the role already says "tool"); the
+      // text protocol needs an explicit header because it arrives as a user message.
       const body = toolChars > MAX_TOTAL_TOOL_CHARS
-        ? 'TOOL RESULT (qisqartirildi): kontekst to‘ldi, keyingi qadamda javob bering.'
-        : `TOOL RESULT for ${call.name} (${output.ok === false ? 'FAILED' : 'OK'}):\n${payload}`;
+        ? 'Kontekst to‘ldi: keyingi qadamda mavjud ma’lumot asosida yakuniy javobni ber.'
+        : viaNative
+          ? payload
+          : `TOOL RESULT for ${call.name} (${output.ok === false ? 'FAILED' : 'OK'}):\n${payload}`;
 
-      if (protocol === 'native') {
+      if (viaNative) {
         messages.push({ role: 'tool', tool_name: call.name, content: body });
       } else {
         messages.push({ role: 'user', content: body });
