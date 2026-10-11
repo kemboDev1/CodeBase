@@ -67,8 +67,13 @@ jobs:
             grep -E "^not ok" tap.log | head -25 | while IFS= read -r line; do
               echo "::error title=FAILING TEST::${line}"
             done
-            echo "──── last 40 lines of TAP output ────"
-            tail -40 tap.log
+            echo "──── assertion details ────"
+            grep -E "^[[:space:]]+(error|code|expected|actual|message|operator):" tap.log \
+              | head -30 | tr -d '\r' | while IFS= read -r line; do
+              echo "::error title=TAP DIAG::$(printf '%.420s' "$line")"
+            done
+            echo "──── last 30 lines ────"
+            tail -30 tap.log
           else
             grep -E "^# (tests|pass|fail|skipped)" tap.log || true
           fi
