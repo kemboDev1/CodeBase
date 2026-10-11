@@ -19,6 +19,8 @@
     "install:all": "npm install && npm --prefix backend install && npm --prefix frontend install",
     "test": "npm --prefix backend test",
     "smoke": "node scripts/smoke.mjs",
+    "e2e": "node scripts/e2e-real.mjs",
+    "ollama": "node scripts/ollama.mjs",
     "verify": "node scripts/verify.mjs"
   },
   "devDependencies": {

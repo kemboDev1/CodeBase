@@ -67,9 +67,11 @@ npm run install:all     # root + backend + frontend dependencies
 npm run build           # backend bundle + frontend bundle
 npm run desktop         # build and open the Electron app
 npm run dev             # backend (3030) + Vite (5173) for UI work
-npm test                # 123 backend tests
-npm run smoke           # live end-to-end test (real HTTP + SSE + MCP + plugins)
+npm test                # 140 backend tests (node:test)
+npm run smoke           # live end-to-end test: real HTTP + SSE + MCP + plugins (58 checks)
 npm run verify          # environment check (Node, deps, builds, Ollama, models)
+npm run e2e             # real Ollama model drives the agent loop (reads and fixes a file)
+npm run ollama          # Ollama helper: status | enable | disable | start | stop
 npm run dist:win        # Windows installer into release/
 ```
 
