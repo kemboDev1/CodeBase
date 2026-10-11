@@ -1,0 +1,19 @@
+{
+  "name": "codebase-backend",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "CodeBase Agent backend — local Ollama agent runtime with tools, MCP, plugins and skills",
+  "main": "src/server.js",
+  "scripts": {
+    "dev": "node --watch src/server.js",
+    "start": "node src/server.js",
+    "test": "node --test \"test/*.test.mjs\"",
+    "test:core": "node --test \"test/*.test.mjs\" --test-skip-pattern=\"example server\""
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.6.1",
+    "express": "^5.1.0"
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "name": "example-tools",
+  "version": "1.0.0",
+  "description": "Reference plugin for CodeBase Agent: project statistics tool and a /hello slash command.",
+  "author": "CodeBase Agent",
+  "main": "index.mjs",
+  "permissions": ["filesystem:read"],
+  "homepage": "https://github.com/codebase-agent/codebase-agent"
+}

@@ -1,0 +1,78 @@
+{
+  "name": "codebase-local-ai",
+  "productName": "CodeBase",
+  "version": "1.0.0",
+  "private": true,
+  "description": "CodeBase Agent — local-first AI coding agent powered by Ollama, with real agent tools, MCP servers, plugins and skills.",
+  "main": "electron/main.cjs",
+  "license": "MIT",
+  "scripts": {
+    "dev": "concurrently -k -n API,WEB -c blue,green \"npm run dev:api\" \"npm run dev:web\"",
+    "dev:api": "node backend/src/server.js",
+    "dev:web": "npm --prefix frontend run dev",
+    "start": "node backend/src/server.js",
+    "build": "npm run build:backend && npm --prefix frontend run build",
+    "build:backend": "node scripts/build-backend.mjs",
+    "desktop": "npm run build && electron .",
+    "desktop:open": "electron .",
+    "dist:win": "npm run build && electron-builder --win nsis --x64",
+    "install:all": "npm install && npm --prefix backend install && npm --prefix frontend install",
+    "test": "npm --prefix backend test",
+    "smoke": "node scripts/smoke.mjs",
+    "verify": "node scripts/verify.mjs"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1",
+    "electron": "^44.7.0",
+    "electron-builder": "^26.17.0",
+    "esbuild": "^0.25.10"
+  },
+  "build": {
+    "appId": "com.codebase.localai",
+    "productName": "CodeBase",
+    "asar": true,
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "electron/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "backend/dist",
+        "to": "backend/dist",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "frontend/dist",
+        "to": "web",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "CodeBase-Setup-${version}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "CodeBase"
+    },
+    "compression": "store"
+  }
+}
