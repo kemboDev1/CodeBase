@@ -31,6 +31,19 @@ export default function ApprovalModal({ requests = [], onResolve }) {
   const current = queue[0];
   const primaryRef = useRef(null);
 
+  // `decide`/`deny` must be declared BEFORE the effects below: a dependency array is
+  // evaluated during render, so referencing them earlier threw
+  // "Cannot access 'deny' before initialization" and blanked the whole window.
+  const decide = useCallback((option) => {
+    if (!current) return;
+    onResolve?.(current, { approved: option.approved, remember: option.remember });
+  }, [current, onResolve]);
+
+  const deny = useCallback(() => {
+    if (!current) return;
+    onResolve?.(current, { approved: false, remember: 'once' });
+  }, [current, onResolve]);
+
   useEffect(() => {
     if (!current) return undefined;
     const timer = setTimeout(() => primaryRef.current?.focus?.(), 30);
@@ -49,16 +62,6 @@ export default function ApprovalModal({ requests = [], onResolve }) {
     window.addEventListener('keydown', onKey, true);
     return () => window.removeEventListener('keydown', onKey, true);
   }, [current?.id, deny]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  const decide = useCallback((option) => {
-    if (!current) return;
-    onResolve?.(current, { approved: option.approved, remember: option.remember });
-  }, [current, onResolve]);
-
-  const deny = useCallback(() => {
-    if (!current) return;
-    onResolve?.(current, { approved: false, remember: 'once' });
-  }, [current, onResolve]);
 
   if (!current) return null;
 

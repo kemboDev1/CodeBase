@@ -52,6 +52,11 @@ jobs:
       - name: Build frontend
         run: npm --prefix frontend run build
 
+      # Renders the shell and every page in Node: a crash during the first render shows
+      # up as a blank Electron window, which no other test would catch.
+      - name: Renderer smoke test (all pages)
+        run: npm run check:ui
+
       - name: Backend tests
         shell: bash
         working-directory: backend

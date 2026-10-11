@@ -27,3 +27,7 @@ Thumbs.db
 
 # CI reproduction checkout
 .ci-repro/
+
+# renderer smoke-test scratch
+frontend/.ssr-check/
+frontend/.ssr-entry.jsx

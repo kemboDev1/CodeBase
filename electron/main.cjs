@@ -246,6 +246,22 @@ function createWindow() {
     log('Renderer crashed:', details.reason);
     if (details.reason !== 'clean-exit' && mainWindow && !mainWindow.isDestroyed()) mainWindow.reload();
   });
+  // Renderer errors are otherwise invisible: a thrown error during render paints a blank
+  // window and the main process never hears about it. Write them to main.log.
+  mainWindow.webContents.on('console-message', (...args) => {
+    const first = args[1];
+    if (first && typeof first === 'object') {
+      if (first.level === 'error' || first.level === 'warning' || first.level >= 2) {
+        logLine('RENDERER', `${first.message} (${first.sourceId || ''}:${first.lineNumber || 0})`);
+      }
+      return;
+    }
+    const level = Number(first);
+    if (level >= 2) logLine('RENDERER', `${args[2]} (${args[4] || ''}:${args[3] || 0})`);
+  });
+  mainWindow.webContents.on('did-fail-load', (_event, code, description, url) => {
+    logLine('ERROR', `Sahifa yuklanmadi: ${description} (${code}) ${url}`);
+  });
 
   mainWindow.loadURL(url).catch((error) => {
     dialog.showErrorBox('CodeBase yuklanmadi', `${error.message}\n\nBackend: http://127.0.0.1:${supervisor.port}/`);

@@ -18,6 +18,7 @@
     "dist:win": "npm run build && electron-builder --win nsis --x64",
     "install:all": "npm install && npm --prefix backend install && npm --prefix frontend install",
     "test": "npm --prefix backend test",
+    "check:ui": "node scripts/ssr-check.mjs",
     "smoke": "node scripts/smoke.mjs",
     "e2e": "node scripts/e2e-real.mjs",
     "ollama": "node scripts/ollama.mjs",
