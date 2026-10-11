@@ -56,7 +56,23 @@ jobs:
         shell: bash
         working-directory: backend
         # The glob is expanded by bash (not node) so this works on Node 20 and 22 alike.
-        run: node --test $(ls test/*.test.mjs)
+        # TAP output is kept in a file so a red build reports *which* test failed as a
+        # GitHub annotation — otherwise the reason is buried in the job log.
+        run: |
+          set +e
+          node --test --test-reporter=tap $(ls test/*.test.mjs) > tap.log 2>&1
+          status=$?
+          if [ $status -ne 0 ]; then
+            echo "──── failing tests ────"
+            grep -E "^not ok" tap.log | head -25 | while IFS= read -r line; do
+              echo "::error title=FAILING TEST::${line}"
+            done
+            echo "──── last 40 lines of TAP output ────"
+            tail -40 tap.log
+          else
+            grep -E "^# (tests|pass|fail|skipped)" tap.log || true
+          fi
+          exit $status
 
       - name: Verify build artifacts
         shell: bash

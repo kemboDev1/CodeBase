@@ -21,6 +21,17 @@ function makeStore(overrides = {}) {
   };
 }
 
+/** Poll until `predicate()` is truthy (fixed sleeps are flaky on loaded CI runners). */
+async function waitFor(predicate, timeoutMs = 10_000, stepMs = 20) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const value = predicate();
+    if (value) return value;
+    if (Date.now() > deadline) return null;
+    await new Promise((resolve) => setTimeout(resolve, stepMs));
+  }
+}
+
 function makeTool(overrides = {}) {
   return {
     name: 'test.read',
@@ -119,7 +130,7 @@ test('permissions: ask siyosati rad etilsa tool ishlamaydi', async () => {
   registry.register(makeTool({ name: 'test.write', defaultPolicy: 'ask', run: async () => { ran = true; return { ok: true, content: 'x' }; } }));
 
   const pending = registry.execute('test.write', { path: 'a.js' }, { permissions, emit: () => {}, sessionId: 's1' });
-  await new Promise((resolve) => setTimeout(resolve, 20));
+  await waitFor(() => events.find((event) => event.type === 'permission_request'));
 
   const request = events.find((event) => event.type === 'permission_request');
   assert.ok(request, 'permission_request eventi yuborilishi kerak');
@@ -142,8 +153,9 @@ test('permissions: tasdiqlansa tool ishlaydi va session grant saqlanadi', async 
   registry.register(makeTool({ name: 'test.patch', defaultPolicy: 'ask', run: async () => { calls += 1; return { ok: true, content: 'patched' }; } }));
 
   const first = registry.execute('test.patch', { path: 'a.js' }, { permissions, emit: () => {}, sessionId: 'session-42' });
-  await new Promise((resolve) => setTimeout(resolve, 20));
+  await waitFor(() => events.find((event) => event.type === 'permission_request'));
   const request = events.find((event) => event.type === 'permission_request');
+  assert.ok(request, 'permission_request eventi yuborilishi kerak');
   permissions.grantSession('session-42', 'test.patch');
   permissions.resolve(request.id, { approved: true, remember: 'session' });
   assert.equal((await first).ok, true);

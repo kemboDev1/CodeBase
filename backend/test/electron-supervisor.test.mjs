@@ -34,7 +34,8 @@ supervisor.on('status', (status) => statuses.push(status));
 let started = null;
 
 test('supervisor backendni ishga tushiradi va haqiqiy portni aniqlaydi', async () => {
-  started = await supervisor.start();
+  // CI runnerlari sekin va yuklangan bo'ladi — kutish vaqtini kengaytiramiz.
+  started = await supervisor.start({ readyTimeoutMs: 90_000 });
   assert.ok(started.port > 0, 'port aniqlanmadi');
   assert.match(started.apiBase, /^http:\/\/127\.0\.0\.1:\d+\/api$/);
   assert.equal(supervisor.status.running, true);
@@ -89,11 +90,21 @@ test('stop() backend jarayonini o‘ldiradi', async () => {
   const port = started.port;
   await supervisor.stop();
   assert.equal(supervisor.status.running, false);
-  await new Promise((resolve) => setTimeout(resolve, 600));
-  await assert.rejects(async () => {
-    const response = await fetch(`http://127.0.0.1:${port}/api/health`, { signal: AbortSignal.timeout(2_000) });
-    if (response.ok) throw new Error('backend hali ham javob bermoqda');
-  });
+
+  // Poll until the port stops answering instead of sleeping a fixed amount: a CI
+  // runner may need longer than 600 ms to tear the child process down.
+  let answered = true;
+  const deadline = Date.now() + 15_000;
+  while (answered && Date.now() < deadline) {
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/api/health`, { signal: AbortSignal.timeout(2_000) });
+      answered = response.ok;
+    } catch {
+      answered = false;
+    }
+    if (answered) await new Promise((resolve) => setTimeout(resolve, 150));
+  }
+  assert.equal(answered, false, `backend ${port} portida hali ham javob bermoqda`);
 });
 
 test('restart() yangi port bilan qayta ishga tushiradi', async () => {

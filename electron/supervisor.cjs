@@ -67,8 +67,12 @@ class Supervisor extends EventEmitter {
     return path.join(base, 'data');
   }
 
-  /** Start the backend; resolves with `{ port, apiBase }` once it reports READY. */
-  async start() {
+  /**
+   * Start the backend; resolves with `{ port, apiBase }` once it reports READY.
+   * @param {{ readyTimeoutMs?: number }} [options] `readyTimeoutMs` lets slow or
+   *   heavily loaded machines (CI runners) wait longer than the 30 s default.
+   */
+  async start({ readyTimeoutMs = 30_000 } = {}) {
     if (this.child) return { port: this.port, apiBase: this.apiBase };
     const entry = this.resolveBackendEntry();
     if (!fs.existsSync(entry)) {
@@ -142,7 +146,7 @@ class Supervisor extends EventEmitter {
 
     child.on('exit', (code, signal) => this.onExit(code, signal));
 
-    return this.waitForReady(30_000);
+    return this.waitForReady(readyTimeoutMs);
   }
 
   waitForReady(timeoutMs = 30_000) {

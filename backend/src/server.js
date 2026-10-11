@@ -323,9 +323,21 @@ app.use(
 
 // ── static web app (packaged desktop mode) ───────────────────────────────────
 if (config.webDir) {
+  const indexFile = path.join(config.webDir, 'index.html');
   app.use(express.static(config.webDir, { index: false, dotfiles: 'ignore', maxAge: '1h' }));
-  app.get(/^\/(?!api(?:\/|$)).*/, (_req, res) => {
-    res.sendFile(path.join(config.webDir, 'index.html'));
+  app.get(/^\/(?!api(?:\/|$)).*/, (_req, res, next) => {
+    if (!fsSync.existsSync(indexFile)) {
+      return next(new AppError(`Frontend qurilmagan (${indexFile} topilmadi). "npm --prefix frontend run build" ni ishga tushiring.`, 503, 'web_not_built'));
+    }
+    // dotfiles:'allow' is required: without it `send` rejects an absolute path that
+    // contains a dot-segment (e.g. a checkout in ".ci-repro"), which surfaced as a
+    // confusing 404 for "/" while every static asset still worked.
+    return res.sendFile(indexFile, { dotfiles: 'allow' }, (error) => {
+      if (error && !res.headersSent) {
+        log.warn(`index.html yuborilmadi: ${error.message}`);
+        next(error);
+      }
+    });
   });
 }
 

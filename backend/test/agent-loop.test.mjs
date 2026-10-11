@@ -144,6 +144,21 @@ function resetEvents() {
   events.length = 0;
 }
 
+/**
+ * Poll until `predicate()` returns something truthy, or the timeout expires.
+ * Fixed `setTimeout` sleeps used as synchronisation make tests flaky on loaded
+ * machines (CI runners), so every wait in this file is a condition wait.
+ */
+async function waitFor(predicate, timeoutMs = 10_000, stepMs = 20) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const value = predicate();
+    if (value) return value;
+    if (Date.now() > deadline) return null;
+    await new Promise((resolve) => setTimeout(resolve, stepMs));
+  }
+}
+
 test('native tool calling: tool ishlaydi va natija javobga qo‘shiladi', async () => {
   script = [
     { content: ['Faylni o‘qiyapman.'], toolCalls: [{ name: 'fs.read', arguments: { path: 'src.js' } }] },
@@ -242,7 +257,7 @@ test('ruxsat rad etilsa tool ishlamaydi va model xato oladi', async () => {
     workspaceRoot: root
   });
 
-  await new Promise((resolve) => setTimeout(resolve, 60));
+  await waitFor(() => events.find((event) => event.type === 'permission_request'));
   const request = events.find((event) => event.type === 'permission_request');
   assert.ok(request, 'permission_request yuborilishi kerak');
   permissions.resolve(request.id, { approved: false });

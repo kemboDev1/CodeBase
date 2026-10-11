@@ -24,3 +24,6 @@ Thumbs.db
 .idea/
 .vscode/
 *.codebase-tmp
+
+# CI reproduction checkout
+.ci-repro/
