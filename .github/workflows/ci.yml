@@ -55,29 +55,27 @@ jobs:
       - name: Backend tests
         shell: bash
         working-directory: backend
-        # The glob is expanded by bash (not node) so this works on Node 20 and 22 alike.
-        # TAP output is kept in a file so a red build reports *which* test failed as a
-        # GitHub annotation — otherwise the reason is buried in the job log.
+        # Test files run one at a time: several of them spawn real servers and child
+        # processes, and a 2-core CI runner has no headroom for 13 of those in parallel.
+        # TAP output is kept so a red build reports *which* test failed and why.
         run: |
           set +e
-          node --test --test-reporter=tap $(ls test/*.test.mjs) > tap.log 2>&1
-          status=$?
-          if [ $status -ne 0 ]; then
-            echo "──── failing tests ────"
-            grep -E "^not ok" tap.log | head -25 | while IFS= read -r line; do
-              echo "::error title=FAILING TEST::${line}"
-            done
-            echo "──── assertion details ────"
-            grep -E "^[[:space:]]+(error|code|expected|actual|message|operator):" tap.log \
-              | head -30 | tr -d '\r' | while IFS= read -r line; do
-              echo "::error title=TAP DIAG::$(printf '%.420s' "$line")"
-            done
-            echo "──── last 30 lines ────"
-            tail -30 tap.log
+          : > tap.log
+          failed=0
+          for file in $(ls test/*.test.mjs); do
+            node --test --test-reporter=tap "$file" >> tap.log 2>&1 || failed=1
+          done
+          if [ $failed -ne 0 ]; then
+            names=$(grep -E "^not ok" tap.log | head -12 | tr '\n' '|' | tr -d '\r')
+            echo "::error title=BACKEND TESTS FAILED::${names}"
+            details=$(grep -E "^[[:space:]]+(error|location|code|expected|actual|operator):" tap.log | head -40 | tr '\n' '|' | tr -d '\r')
+            echo "::error title=TAP ERROR DETAILS::$(printf '%.3500s' "$details")"
+            echo "──── last 25 lines ────"
+            tail -25 tap.log
           else
             grep -E "^# (tests|pass|fail|skipped)" tap.log || true
           fi
-          exit $status
+          exit $failed
 
       - name: Verify build artifacts
         shell: bash
