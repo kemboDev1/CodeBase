@@ -502,6 +502,10 @@ export function AppProvider({ children }) {
           )));
         },
         summary: (event) => patchDraft({ summary: event.summary || event.text || '' }),
+        notice: (event) => {
+          const text = event.message || event.text || '';
+          if (text) pushToast(text, 'warn');
+        },
         done: (event) => {
           setMessages((prev) => prev.map((item) => {
             if (item.id !== draftId) return item;
