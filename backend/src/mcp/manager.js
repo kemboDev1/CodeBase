@@ -350,7 +350,10 @@ export function createMcpManager({ store, registry, logger, emit, timeoutMs, spa
         .then(() => startInternal(entry))
         .catch((error) => log.warn(`MCP "${entry.server?.name}" avtomatik qayta ishga tushmadi: ${describeError(error)}`));
     }, delay);
-    if (typeof entry.restartTimer.unref === 'function') entry.restartTimer.unref();
+    // Deliberately ref'd: a scheduled restart is real work. When the backend runs it
+    // has a listening server keeping the loop alive anyway, while in a short-lived
+    // process (a test file) an unref'd timer lets Node exit mid-restart and every
+    // remaining test fails with "event loop has already resolved".
     log.warn(`MCP "${entry.server?.name}" yiqildi; ${delay} ms dan keyin qayta uriniladi (${entry.restartAttempts}/${RESTART_LIMIT}).`);
   }
 

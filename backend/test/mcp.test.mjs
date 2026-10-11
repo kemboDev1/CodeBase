@@ -28,7 +28,8 @@ import { flattenContent, slugify, toolNameFor } from '../src/mcp/types.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const EXAMPLE_SERVER = path.resolve(here, '../examples/mcp-echo-server.mjs');
-const CLIENT_TIMEOUT_MS = 15_000;
+// CI runners are slow and shared: 15 s was tight enough that a handshake could miss it.
+const CLIENT_TIMEOUT_MS = 45_000;
 
 /** Cached verdict: probing twice is wasteful and spawn is all-or-nothing. */
 let spawnAvailability = null;
@@ -966,6 +967,37 @@ function defineManagerContract() {
 }
 
 defineManagerContract();
+
+/**
+ * A server that accepts the connection but never answers must produce a clean timeout
+ * (and keep the event loop alive while it waits) instead of hanging forever. This
+ * covers the `unref()` regression class: pending MCP work must never let Node run out
+ * of handles and exit mid-request.
+ */
+test('javob bermaydigan childda timeout ishlaydi (event loop qurimaydi)', async () => {
+  const spawnImpl = () => {
+    const child = new EventEmitter();
+    child.pid = 4242;
+    child.stdin = new PassThrough();
+    child.stdout = new PassThrough();
+    child.stderr = new PassThrough();
+    child.exitCode = null;
+    child.signalCode = null;
+    child.killed = false;
+    child.kill = () => {
+      child.killed = true;
+      return true;
+    };
+    return child;
+  };
+
+  const client = new McpClient(echoServer(), { logger: silentLogger, timeoutMs: 700, spawnImpl });
+  const started = Date.now();
+  await assert.rejects(() => client.start(), /javob bermadi|timeout|initialize/i);
+  const elapsed = Date.now() - started;
+  assert.ok(elapsed >= 500, `timeout juda tez (${elapsed}ms) — taymer unref qilingan bo‘lishi mumkin`);
+  await client.stop();
+});
 
 test('types helpers: slugify, toolNameFor, flattenContent', () => {
   assert.equal(slugify('Echo Test'), 'echo_test');

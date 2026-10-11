@@ -165,7 +165,8 @@ export class McpClient extends EventEmitter {
         return resolve(undefined);
       }
       const timer = setTimeout(() => resolve(undefined), KILL_GRACE_MS);
-      if (typeof timer.unref === 'function') timer.unref();
+      // Keep this ref'd: `stop()` awaits it, and an unref'd timer would let the process
+      // exit before the graceful-shutdown window elapsed.
       child.once('exit', () => {
         exited = true;
         clearTimeout(timer);
@@ -210,7 +211,10 @@ export class McpClient extends EventEmitter {
         this.lastError = error.message;
         reject(error);
       }, effectiveTimeout);
-      if (typeof timer.unref === 'function') timer.unref();
+      // Deliberately NOT unref'd: a pending JSON-RPC request is real work. With an
+      // unref'd timer a short-lived process (a test file, a CLI run) can run out of
+      // handles and exit while the request is still pending, which surfaces as
+      // "Promise resolution is still pending but the event loop has already resolved".
 
       this.pending.set(id, { resolve, reject, timer, method });
       const sent = this._writeMessage({ jsonrpc: '2.0', id, method, params: params ?? {} });
@@ -515,7 +519,7 @@ export function killProcessTree(child) {
       if (process.platform === 'win32') {
         const killer = spawn('taskkill', ['/pid', String(pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true, shell: false });
         const timer = setTimeout(finish, KILL_GRACE_MS);
-        if (typeof timer.unref === 'function') timer.unref();
+        // Ref'd on purpose: callers await this promise.
         killer.on('error', () => {
           clearTimeout(timer);
           try {
@@ -544,7 +548,7 @@ export function killProcessTree(child) {
         }
         finish();
       }, 500);
-      if (typeof timer.unref === 'function') timer.unref();
+      // Ref'd on purpose: callers await this promise.
       child.once('exit', () => {
         clearTimeout(timer);
         finish();
