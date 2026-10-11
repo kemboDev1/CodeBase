@@ -8,7 +8,7 @@ on:
 
 jobs:
   test:
-    name: Test & build (${{ matrix.os }})
+    name: Test & build (Node ${{ matrix.node }} · ${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -30,6 +30,10 @@ jobs:
             backend/package-lock.json
             frontend/package-lock.json
 
+      - name: Show toolchain
+        run: node -v && npm -v
+
+      # Electron's binary download is skipped on purpose: CI never opens a window.
       - name: Install root dependencies
         run: npm ci --ignore-scripts
         continue-on-error: true
@@ -40,15 +44,19 @@ jobs:
       - name: Install frontend dependencies
         run: npm --prefix frontend ci
 
-      - name: Backend tests
-        working-directory: backend
-        run: node --test "test/*.test.mjs"
-
+      # Build first: the backend bundle and the web UI are shipped artifacts and one
+      # supervisor test asserts that the built UI is served.
       - name: Build backend bundle
         run: node scripts/build-backend.mjs
 
       - name: Build frontend
         run: npm --prefix frontend run build
+
+      - name: Backend tests
+        shell: bash
+        working-directory: backend
+        # The glob is expanded by bash (not node) so this works on Node 20 and 22 alike.
+        run: node --test $(ls test/*.test.mjs)
 
       - name: Verify build artifacts
         shell: bash
@@ -69,7 +77,11 @@ jobs:
         with:
           node-version: 22
       - name: Parse every backend module
+        shell: bash
         run: |
-          for file in $(find backend/src backend/examples backend/test -name "*.mjs" -o -name "*.js"); do
+          for file in $(find backend/src backend/examples backend/test scripts -name "*.mjs" -o -name "*.js"); do
             node --check "$file"
           done
+          node --check electron/main.cjs
+          node --check electron/preload.cjs
+          node --check electron/supervisor.cjs

@@ -1,12 +1,18 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
 const { Supervisor } = require('../../electron/supervisor.cjs');
+
+const here = path.dirname(fileURLToPath(import.meta.url));
+// The static-UI assertion only makes sense once the frontend has been built.
+const frontendBuilt = existsSync(path.resolve(here, '..', '..', 'frontend', 'dist', 'index.html'));
 
 /**
  * Exercises the Electron supervisor without opening a window: a stub `app` provides
@@ -73,7 +79,7 @@ test('supervisor API yordamchilari backend bilan gaplashadi', async () => {
   assert.equal(typeof autostart, 'boolean');
 });
 
-test('statik UI (frontend/dist) xizmat qilinadi', async () => {
+test('statik UI (frontend/dist) xizmat qilinadi', { skip: !frontendBuilt && 'frontend/dist qurilmagan (npm --prefix frontend run build)' }, async () => {
   const response = await fetch(`http://127.0.0.1:${started.port}/`);
   assert.equal(response.ok, true);
   assert.match(await response.text(), /<div id="root">/);
