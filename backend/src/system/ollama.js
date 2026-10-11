@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { runCommand } from '../lib/shell.js';
 import { logger } from '../lib/logger.js';
 import * as ollama from '../ollama/client.js';
@@ -106,10 +106,23 @@ export async function stop() {
 
 async function regQuery() {
   if (process.platform !== 'win32') return null;
-  const result = await runCommand(`reg query "${RUN_KEY}" /v ${RUN_VALUE}`, { timeoutMs: 10_000 });
-  if (result.code !== 0) return null;
+  const result = regExec(['query', RUN_KEY, '/v', RUN_VALUE]);
+  if (result.status !== 0) return null;
   const match = /REG_SZ\s+(.+)$/m.exec(result.stdout);
   return match ? match[1].trim() : null;
+}
+
+/**
+ * Run reg.exe directly (no cmd.exe wrapper): cmd cannot escape the quotes around an
+ * executable path that contains spaces, which silently produced "Invalid syntax".
+ */
+function regExec(args) {
+  const result = spawnSync('reg.exe', args, { encoding: 'utf8', windowsHide: true, timeout: 15_000 });
+  return {
+    status: result.error ? -1 : result.status,
+    stdout: result.stdout || '',
+    stderr: `${result.stderr || ''}${result.error ? result.error.message : ''}`
+  };
 }
 
 export async function autostartEnabled() {
@@ -123,16 +136,14 @@ export async function setAutostart(enabled) {
   if (enabled) {
     const exe = findOllamaExecutable();
     if (!exe) return { ok: false, enabled: false, error: 'Ollama topilmadi — avval uni o‘rnating.' };
-    const result = await runCommand(
-      `reg add "${RUN_KEY}" /v ${RUN_VALUE} /t REG_SZ /d "\\"${exe}\\"" /f`,
-      { timeoutMs: 15_000 }
-    );
-    if (result.code !== 0) {
+    const result = regExec(['add', RUN_KEY, '/v', RUN_VALUE, '/t', 'REG_SZ', '/d', `"${exe}"`, '/f']);
+    if (result.status !== 0) {
       return { ok: false, enabled: false, error: `${result.stdout}${result.stderr}`.trim() };
     }
-    return { ok: true, enabled: true, exe };
+    const stored = await regQuery();
+    return { ok: Boolean(stored), enabled: Boolean(stored), exe, stored };
   }
-  const result = await runCommand(`reg delete "${RUN_KEY}" /v ${RUN_VALUE} /f`, { timeoutMs: 15_000 });
+  const result = regExec(['delete', RUN_KEY, '/v', RUN_VALUE, '/f']);
   // Deleting a missing value returns a non-zero code; that is still "disabled".
   return { ok: true, enabled: false, output: `${result.stdout}${result.stderr}`.trim() };
 }
